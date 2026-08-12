@@ -13,6 +13,7 @@ enum {
   ERR_BAD_FREQ = 5,
 };
 enum {
+  local_smoothing = 64,
   chunk_size = 1024,
   chunks_per_buffer = 8,
   buffer_size = chunk_size * chunks_per_buffer,
@@ -109,9 +110,20 @@ int find_wave_frequency_hz(const int16_t *buffer) {
 
     // printf("difference: %.5f\n", difference);
 
+    static double differences[local_smoothing] = {0};
+
+    double best_local_minimum = 1000;
+    for (int i = 0; i < local_smoothing; i++) {
+      differences[i] = fabs((buffer[i + t] / 32768.0) - (buffer[i] / 32768.0));
+      if (differences[i] < best_local_minimum) {
+        best_local_minimum = differences[i];
+      }
+    }
+
+    printf("best local minimum (sample of %d): %.5f\n",local_smoothing, best_local_minimum);
     best_difference = difference;
     mean_difference = total_difference / k;
-    printf("mean_diff: %.5f\n k : %d \n", mean_difference, k);
+    // printf("mean_diff: %.5f\n k : %d \n", mean_difference, k);
     t++;
     k++;
   }
@@ -119,16 +131,6 @@ int find_wave_frequency_hz(const int16_t *buffer) {
   if (best_t == -1) {
     return ERR_BAD_FREQ;
   }
-
-
-
-
-  static double differences[16] = {0};
-
-  for (int i = 0; i < 16; i++){
-    differences[i] = (buffer[i + t] / 32768.0) -  (buffer[i] / 32768.0);
-  }
-
 
   return (int)(48000.0 / t);
 }
