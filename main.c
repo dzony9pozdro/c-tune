@@ -1,32 +1,34 @@
 #include <SDL3/SDL.h>
 #include <stdio.h>
 
-#define CHUNK_SIZE
-
 enum STATUS {
-  SAMPLE_WAIT = 0,
+
+  SUCCESS = 0,
   ERR_AUDIO_READ = 1,
   ERR_AUDIO_AVAILABLE = 2,
+  SAMPLE_WAIT = 3,
+  ERR_DEVICE_SPEC = 4,
 };
-static int device_data(uint8_t device) {
-  SDL_AudioSpec actual;
+static int get_device_spec(uint32_t device) {
+  SDL_AudioSpec device_spec;
   int sample_frames;
 
-  if (!SDL_GetAudioDeviceFormat(device, &actual, &sample_frames)) {
+  if (!SDL_GetAudioDeviceFormat(device, &device_spec, &sample_frames)) {
     fprintf(stderr, "SDL_GetAudioDeviceFormat: %s\n", SDL_GetError());
-    return 1;
+    return ERR_DEVICE_SPEC;
   }
 
-  printf("freq: %d Hz\n", actual.freq);
-  printf("channels: %d\n", actual.channels);
-  printf("format: 0x%x\n", actual.format);
+  printf("freq: %d Hz\n", device_spec.freq);
+  printf("channels: %d\n", device_spec.channels);
+  printf("format: 0x%x\n", device_spec.format);
   printf("sample frames per device buffer: %d\n", sample_frames);
 
-  printf("is float: %d\n", SDL_AUDIO_ISFLOAT(actual.format));
-  printf("bits/sample: %d\n", SDL_AUDIO_BITSIZE(actual.format));
-  printf("bytes/sample: %d\n", SDL_AUDIO_BYTESIZE(actual.format));
-  return 0;
+  printf("is float: %d\n", SDL_AUDIO_ISFLOAT(device_spec.format));
+  printf("bits/sample: %d\n", SDL_AUDIO_BITSIZE(device_spec.format));
+  printf("bytes/sample: %d\n", SDL_AUDIO_BYTESIZE(device_spec.format));
+  return SUCCESS;
 }
+
 int process(SDL_AudioStream *stream) {
   int available = SDL_GetAudioStreamAvailable(stream);
 
@@ -36,9 +38,8 @@ int process(SDL_AudioStream *stream) {
   }
 
   int16_t samples[1024];
-
   if (available < (int)sizeof samples) {
-    SDL_Delay(1);
+    SDL_Delay(3);
     return SAMPLE_WAIT;
   }
 
@@ -49,18 +50,11 @@ int process(SDL_AudioStream *stream) {
     return ERR_AUDIO_READ;
   }
 
-  if (bytes < 0) {
-    fprintf(stderr, "audio read: %s\n", SDL_GetError());
-    return ERR_AUDIO_READ;
-  }
-
-  int count = (uint32_t)bytes / sizeof(float);
-
-  // printf("bytes=%d count=%d sizeof(samples)=%zu\n", bytes, count,
-  //        sizeof samples);
+  int count = bytes / (int)sizeof(int16_t);
 
   float max = -1.0;
   float min = 1.0;
+
   // there are 1024 samples per buffer (0..1023)
   for (int i = 0; i < count; i++) {
     // samples[i] ranges from -32768..32767, normalize:
@@ -74,13 +68,15 @@ int process(SDL_AudioStream *stream) {
     if (x < min) {
       min = x;
     }
-
     if (i % 256 == 0) {
       printf("x: %f, min: %f, max: %f\n", x, min, max);
     }
   }
 
-  return 1;
+  // printf("bytes=%d count=%d sizeof(samples)=%zu\n", bytes, count,
+  //        sizeof samples);
+
+  return SUCCESS;
 }
 int main(void) {
   if (!SDL_Init(SDL_INIT_AUDIO)) {
@@ -100,7 +96,9 @@ int main(void) {
     return 1;
   }
   SDL_AudioDeviceID device = devices[0];
-  device_data((uint8_t)device);
+  if (get_device_spec(device) != SUCCESS){
+    return 1;
+  };
 
   SDL_AudioStream *stream =
       SDL_OpenAudioDeviceStream(device, &spec, NULL, NULL);
@@ -120,19 +118,17 @@ int main(void) {
   SDL_Event e;
 
   for (;;) {
+    int status = process(stream);
     while (SDL_PollEvent(&e)) {
       if (e.type == SDL_EVENT_QUIT) {
-        break;
+        goto done;
       }
-      int status = process(stream);
-      if (status == ERR_AUDIO_AVAILABLE || status == ERR_AUDIO_READ) {
-        break;
-      };
     }
 
-    goto done;
+    if (status == ERR_AUDIO_AVAILABLE || status == ERR_AUDIO_READ) {
+      break;
+    };
   }
-
 done:
   SDL_DestroyAudioStream(stream);
   SDL_Quit();
