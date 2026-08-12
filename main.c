@@ -3,6 +3,11 @@
 
 #define CHUNK_SIZE
 
+enum STATUS {
+  SAMPLE_WAIT = 0,
+  ERR_AUDIO_READ = 1,
+  ERR_AUDIO_AVAILABLE = 2,
+};
 static int device_data(uint8_t device) {
   SDL_AudioSpec actual;
   int sample_frames;
@@ -22,8 +27,60 @@ static int device_data(uint8_t device) {
   printf("bytes/sample: %d\n", SDL_AUDIO_BYTESIZE(actual.format));
   return 0;
 }
-void process(){
+int process(SDL_AudioStream *stream) {
+  int available = SDL_GetAudioStreamAvailable(stream);
 
+  if (available < 0) {
+    fprintf(stderr, "audio available: %s\n", SDL_GetError());
+    return ERR_AUDIO_AVAILABLE;
+  }
+
+  int16_t samples[1024];
+
+  if (available < (int)sizeof samples) {
+    SDL_Delay(1);
+    return SAMPLE_WAIT;
+  }
+
+  int bytes = SDL_GetAudioStreamData(stream, samples, sizeof samples);
+
+  if (bytes < 0) {
+    fprintf(stderr, "audio read: %s\n", SDL_GetError());
+    return ERR_AUDIO_READ;
+  }
+
+  if (bytes < 0) {
+    fprintf(stderr, "audio read: %s\n", SDL_GetError());
+    return ERR_AUDIO_READ;
+  }
+
+  int count = (uint32_t)bytes / sizeof(float);
+
+  // printf("bytes=%d count=%d sizeof(samples)=%zu\n", bytes, count,
+  //        sizeof samples);
+
+  float max = -1.0;
+  float min = 1.0;
+  // there are 1024 samples per buffer (0..1023)
+  for (int i = 0; i < count; i++) {
+    // samples[i] ranges from -32768..32767, normalize:
+    float x = samples[i] / (float)32768.0;
+    // this leaves us with a slight asymmetry but it's negligible, and
+    // irrelevant for pitch detection
+
+    if (x > max) {
+      max = x;
+    }
+    if (x < min) {
+      min = x;
+    }
+
+    if (i % 256 == 0) {
+      printf("x: %f, min: %f, max: %f\n", x, min, max);
+    }
+  }
+
+  return 1;
 }
 int main(void) {
   if (!SDL_Init(SDL_INIT_AUDIO)) {
@@ -62,65 +119,20 @@ int main(void) {
 
   SDL_Event e;
 
-  float max = -1.0;
-  float min = 1.0;
   for (;;) {
     while (SDL_PollEvent(&e)) {
       if (e.type == SDL_EVENT_QUIT) {
-        goto done;
+        break;
       }
+      int status = process(stream);
+      if (status == ERR_AUDIO_AVAILABLE || status == ERR_AUDIO_READ) {
+        break;
+      };
     }
 
-    int available = SDL_GetAudioStreamAvailable(stream);
-
-    if (available < 0) {
-      fprintf(stderr, "audio available: %s\n", SDL_GetError());
-      break;
-    }
-
-    int16_t samples[1024];
-
-    if (available < (int)sizeof samples) {
-      SDL_Delay(1);
-      continue;
-    }
-
-    int bytes = SDL_GetAudioStreamData(stream, samples, sizeof samples);
-
-    if (bytes < 0) {
-      fprintf(stderr, "audio read: %s\n", SDL_GetError());
-      break;
-    }
-
-    if (bytes < 0) {
-      fprintf(stderr, "audio read: %s\n", SDL_GetError());
-      break;
-    }
-
-    int count = (uint32_t)bytes / sizeof(float);
-
-    // printf("bytes=%d count=%d sizeof(samples)=%zu\n", bytes, count,
-    //        sizeof samples);
-
-    // there are 1024 samples per buffer (0..1023)
-    for (int i = 0; i < count; i++) {
-      // samples[i] ranges from -32768..32767, normalize:
-      float x = samples[i] / (float)32768.0;
-      // this leaves us with a slight asymmetry but it's negligible, and
-      // irrelevant for pitch detection
-
-      if (x > max) {
-        max = x;
-      }
-      if (x < min) {
-        min = x;
-      }
-
-      if (i % 256 == 0) {
-        printf("x: %f, min: %f, max: %f\n", x, min, max);
-      }
-    }
+    goto done;
   }
+
 done:
   SDL_DestroyAudioStream(stream);
   SDL_Quit();
