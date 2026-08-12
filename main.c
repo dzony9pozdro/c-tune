@@ -1,6 +1,8 @@
 #include <SDL3/SDL.h>
 #include <math.h>
+#include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 enum {
   SUCCESS = 0,
@@ -8,6 +10,7 @@ enum {
   ERR_AUDIO_AVAILABLE = 2,
   SAMPLE_WAIT = 3,
   ERR_DEVICE_SPEC = 4,
+  ERR_BAD_FREQ = 5,
 };
 enum {
   chunk_size = 1024,
@@ -61,7 +64,6 @@ void print_diff(const int t, double difference) {
   int pos_diff = (difference > 0) ? magnitude : 0;
   int neg_diff = (difference < 0) ? magnitude : 0;
 
-
   for (int i = 0; i < middle - neg_diff; i++) {
     putchar(' ');
   }
@@ -79,10 +81,13 @@ void print_diff(const int t, double difference) {
   putchar('\n');
 }
 
-double find_wave_frequency_hz(const int16_t *buffer) {
+int find_wave_frequency_hz(const int16_t *buffer) {
   double difference;
-  double error = 0;
-  double maxerror = 1000000000;
+  double best_difference = 100;
+  int best_t = -1;
+  double total_difference = 0;
+  double mean_difference = 0;
+  static int k = 1;
 
   int t = 15;
 
@@ -92,21 +97,46 @@ double find_wave_frequency_hz(const int16_t *buffer) {
       double b = buffer[i + t] / 32768.0;
 
       difference = b - a;
-      error += fabs(difference);
 
-      if (error > maxerror) {
-        error = 0;
-        break;
+      if (fabs(difference) < fabs(best_difference)) {
+        best_t = t;
       }
+
+      total_difference += fabs(difference);
     }
 
-    print_diff(t, difference);
+    // print_diff(t, difference);
 
+    // printf("difference: %.5f\n", difference);
+
+    best_difference = difference;
+    mean_difference = total_difference / k;
+    printf("mean_diff: %.5f\n k : %d \n", mean_difference, k);
     t++;
+    k++;
   }
 
-  return 48000.0 / t;
+  if (best_t == -1) {
+    return ERR_BAD_FREQ;
+  }
+
+
+
+
+  static double differences[16] = {0};
+
+  for (int i = 0; i < 16; i++){
+    differences[i] = (buffer[i + t] / 32768.0) -  (buffer[i] / 32768.0);
+  }
+
+
+  return (int)(48000.0 / t);
 }
+
+// TODO:
+// void queue(const int f){
+// queue up the frequency to be drawn later
+// }
 
 int process(SDL_AudioStream *stream) {
   int available = SDL_GetAudioStreamAvailable(stream);
@@ -155,7 +185,12 @@ int process(SDL_AudioStream *stream) {
 
   static int16_t buffer[buffer_size] = {0};
   ingest_next_chunk(buffer, samples);
-  find_wave_frequency_hz(buffer);
+
+  (find_wave_frequency_hz(buffer));
+  // TODO:
+  // int freq_status = (find_wave_frequency_hz(buffer));
+  // int frequency = (freq_status != ERR_BAD_FREQ) ? freq_status : 0;
+  // queue(frequency);
 
   return SUCCESS;
 }

@@ -3,6 +3,8 @@ BasedOnStyle: LLVM
 ColumnLimit: 80
 DerivePointerAlignment: false
 PointerAlignment: Right
+AlignOperands: Align
+BreakBeforeTernaryOperators: true
 BinPackArguments: false
 BinPackParameters: false
 AlignAfterOpenBracket: BlockIndent
