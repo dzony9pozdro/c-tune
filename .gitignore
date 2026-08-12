@@ -1,0 +1,7 @@
+*.o
+*.s
+*.dSYM/
+compile_commands.json
+.cache/
+c-tune
+main

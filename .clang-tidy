@@ -1,0 +1,8 @@
+Checks: >
+  bugprone-*,
+  clang-analyzer-*,
+  readability-*,
+  performance-*,
+  -readability-magic-numbers,
+  -readability-identifier-length,
+  -bugprone-narrowing-conversions

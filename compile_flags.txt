@@ -1,0 +1,6 @@
+-I/usr/local/include
+-std=c17
+-Wall
+-Wextra
+-Wshadow
+-Wconversion
