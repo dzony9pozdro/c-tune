@@ -1,14 +1,20 @@
 #include <SDL3/SDL.h>
+#include <math.h>
 #include <stdio.h>
 
-enum STATUS {
-
+enum {
   SUCCESS = 0,
   ERR_AUDIO_READ = 1,
   ERR_AUDIO_AVAILABLE = 2,
   SAMPLE_WAIT = 3,
   ERR_DEVICE_SPEC = 4,
 };
+enum {
+  chunk_size = 1024,
+  chunks_per_buffer = 8,
+  buffer_size = chunk_size * chunks_per_buffer,
+};
+
 static int get_device_spec(uint32_t device) {
   SDL_AudioSpec device_spec;
   int sample_frames;
@@ -29,6 +35,79 @@ static int get_device_spec(uint32_t device) {
   return SUCCESS;
 }
 
+void ingest_next_chunk(int16_t *buffer, const int16_t *samples) {
+
+  // for buffer of chunks A B C D -> B C D D
+  memmove(
+      buffer,
+      buffer + chunk_size,
+      (buffer_size - chunk_size) * sizeof(buffer[0])
+  );
+
+  // B C D D -> B C D E
+  memcpy(
+      buffer + (buffer_size - chunk_size),
+      samples,
+      chunk_size * sizeof(buffer[0])
+  );
+}
+void print_diff(const int t, double difference) {
+  const int scale = 10000;
+
+  int magnitude = (int)fabs(scale * difference);
+
+  int middle = 100;
+
+  int pos_diff = (difference > 0) ? magnitude : 0;
+  int neg_diff = (difference < 0) ? magnitude : 0;
+
+
+  for (int i = 0; i < middle - neg_diff; i++) {
+    putchar(' ');
+  }
+  for (int i = 0; i < neg_diff; i++) {
+    putchar('#');
+  }
+
+  putchar('|');
+  printf("%d", t);
+  putchar('|');
+
+  for (int i = 0; i < pos_diff; i++) {
+    putchar('#');
+  }
+  putchar('\n');
+}
+
+double find_wave_frequency_hz(const int16_t *buffer) {
+  double difference;
+  double error = 0;
+  double maxerror = 1000000000;
+
+  int t = 15;
+
+  while (t < buffer_size) {
+    for (int i = 0; i + t < buffer_size; i++) {
+      double a = buffer[i] / 32768.0;
+      double b = buffer[i + t] / 32768.0;
+
+      difference = b - a;
+      error += fabs(difference);
+
+      if (error > maxerror) {
+        error = 0;
+        break;
+      }
+    }
+
+    print_diff(t, difference);
+
+    t++;
+  }
+
+  return 48000.0 / t;
+}
+
 int process(SDL_AudioStream *stream) {
   int available = SDL_GetAudioStreamAvailable(stream);
 
@@ -37,9 +116,10 @@ int process(SDL_AudioStream *stream) {
     return ERR_AUDIO_AVAILABLE;
   }
 
-  int16_t samples[1024];
+  int16_t samples[chunk_size] = {0};
+
   if (available < (int)sizeof samples) {
-    SDL_Delay(3);
+    SDL_Delay(1);
     return SAMPLE_WAIT;
   }
 
@@ -55,10 +135,10 @@ int process(SDL_AudioStream *stream) {
   float max = -1.0;
   float min = 1.0;
 
-  // there are 1024 samples per buffer (0..1023)
   for (int i = 0; i < count; i++) {
-    // samples[i] ranges from -32768..32767, normalize:
+    // samples[i] ranges from -32768..32767, normalize to -1..1:
     float x = samples[i] / (float)32768.0;
+
     // this leaves us with a slight asymmetry but it's negligible, and
     // irrelevant for pitch detection
 
@@ -69,12 +149,13 @@ int process(SDL_AudioStream *stream) {
       min = x;
     }
     if (i % 256 == 0) {
-      printf("x: %f, min: %f, max: %f\n", x, min, max);
+      // printf("x: %f, cwin: %f, max: %f\n", x, min, max);
     }
   }
 
-  // printf("bytes=%d count=%d sizeof(samples)=%zu\n", bytes, count,
-  //        sizeof samples);
+  static int16_t buffer[buffer_size] = {0};
+  ingest_next_chunk(buffer, samples);
+  find_wave_frequency_hz(buffer);
 
   return SUCCESS;
 }
@@ -96,7 +177,7 @@ int main(void) {
     return 1;
   }
   SDL_AudioDeviceID device = devices[0];
-  if (get_device_spec(device) != SUCCESS){
+  if (get_device_spec(device) != SUCCESS) {
     return 1;
   };
 
@@ -113,19 +194,18 @@ int main(void) {
     return 1;
   }
 
-  // float samples[1024];
-
   SDL_Event e;
 
   for (;;) {
-    int status = process(stream);
+    int process_status = process(stream);
     while (SDL_PollEvent(&e)) {
       if (e.type == SDL_EVENT_QUIT) {
         goto done;
       }
     }
 
-    if (status == ERR_AUDIO_AVAILABLE || status == ERR_AUDIO_READ) {
+    if (process_status == ERR_AUDIO_AVAILABLE ||
+        process_status == ERR_AUDIO_READ) {
       break;
     };
   }

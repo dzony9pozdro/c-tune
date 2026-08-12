@@ -1,5 +1,8 @@
 ---
-BasedOnStyle: Google
+BasedOnStyle: LLVM
 ColumnLimit: 80
 DerivePointerAlignment: false
 PointerAlignment: Right
+BinPackArguments: false
+BinPackParameters: false
+AlignAfterOpenBracket: BlockIndent
