@@ -2,6 +2,14 @@
 #include <math.h>
 #include <stdio.h>
 
+#define SAMPLE_FREQUENCY 48000
+#define TOLERANCE 1e-3
+
+typedef struct {
+  int idx;
+  double value;
+} Err;
+
 enum {
   SUCCESS = 0,
   ERR_AUDIO_READ = 1,
@@ -61,7 +69,6 @@ void print_diff(const int t, double difference) {
   int pos_diff = (difference > 0) ? magnitude : 0;
   int neg_diff = (difference < 0) ? magnitude : 0;
 
-
   for (int i = 0; i < middle - neg_diff; i++) {
     putchar(' ');
   }
@@ -79,33 +86,60 @@ void print_diff(const int t, double difference) {
   putchar('\n');
 }
 
-double find_wave_frequency_hz(const int16_t *buffer) {
-  double difference;
-  double error = 0;
-  double maxerror = 1000000000;
+double get_error_mean(const int16_t *buffer, const int t) {
+  double error_total = 0.0;
+  int error_count = 0;
 
-  int t = 15;
+  for (int i = 0; i + t < buffer_size; i++) {
+    double a = buffer[i] / 32768.0;
+    double b = buffer[i + t] / 32768.0;
 
-  while (t < buffer_size) {
-    for (int i = 0; i + t < buffer_size; i++) {
-      double a = buffer[i] / 32768.0;
-      double b = buffer[i + t] / 32768.0;
-
-      difference = b - a;
-      error += fabs(difference);
-
-      if (error > maxerror) {
-        error = 0;
-        break;
-      }
-    }
-
-    print_diff(t, difference);
-
-    t++;
+    error_total += fabs(b - a);
+    error_count++;
   }
 
-  return 48000.0 / t;
+  return error_total / error_count;
+}
+
+int close_enough(const double error, const double prev_err) {
+  double d = error - prev_err;
+
+  if (d < TOLERANCE) {
+    return 1;
+  }
+
+  return 0;
+}
+
+int find_period(double *lag_err) {
+  Err prev_lowest_err = (Err){-1, INFINITY};
+  int dt = 0;
+
+  for (int i = 0; i < buffer_size; i++){
+    if (lag_err[i] < prev_lowest_err.value){
+      prev_lowest_err = (Err){i, lag_err[i]};
+    }
+  }
+
+  for (int i = 0; i < buffer_size; i++) {
+    if (close_enough(lag_err[i], prev_lowest_err.value)) {
+      printf("match\n");
+      dt = i - prev_lowest_err.idx;
+    }
+  }
+
+  return dt;
+}
+int get_freq_hz(const int16_t *buffer) {
+  double lag_err[buffer_size];
+
+  for (int t = 0; t < buffer_size; t++) {
+    lag_err[t] = get_error_mean(buffer, t);
+  }
+
+  int dt = find_period(lag_err);
+
+  return (int)((float)SAMPLE_FREQUENCY / (float)dt);
 }
 
 int process(SDL_AudioStream *stream) {
@@ -130,32 +164,9 @@ int process(SDL_AudioStream *stream) {
     return ERR_AUDIO_READ;
   }
 
-  int count = bytes / (int)sizeof(int16_t);
-
-  float max = -1.0;
-  float min = 1.0;
-
-  for (int i = 0; i < count; i++) {
-    // samples[i] ranges from -32768..32767, normalize to -1..1:
-    float x = samples[i] / (float)32768.0;
-
-    // this leaves us with a slight asymmetry but it's negligible, and
-    // irrelevant for pitch detection
-
-    if (x > max) {
-      max = x;
-    }
-    if (x < min) {
-      min = x;
-    }
-    if (i % 256 == 0) {
-      // printf("x: %f, cwin: %f, max: %f\n", x, min, max);
-    }
-  }
-
   static int16_t buffer[buffer_size] = {0};
   ingest_next_chunk(buffer, samples);
-  find_wave_frequency_hz(buffer);
+  get_freq_hz(buffer);
 
   return SUCCESS;
 }
