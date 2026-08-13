@@ -5,6 +5,7 @@
 
 #define SAMPLE_FREQUENCY 48000
 #define MIN_DEPTH_TO_MATCH 1e-4
+#define NOISE_GATE_RMS 0.004
 
 typedef struct {
   int idx;
@@ -19,8 +20,9 @@ enum {
   ERR_DEVICE_SPEC = 4,
   ERR_BAD_FREQ = 5,
 };
+
 enum {
-  max_dt = 2400, // 20hz
+  max_dt = 2400, // 20 Hz
   scope = 5,
   chunk_size = 1024,
   chunks_per_buffer = 8,
@@ -44,30 +46,28 @@ static int get_device_spec(uint32_t device) {
   printf("is float: %d\n", SDL_AUDIO_ISFLOAT(device_spec.format));
   printf("bits/sample: %d\n", SDL_AUDIO_BITSIZE(device_spec.format));
   printf("bytes/sample: %d\n", SDL_AUDIO_BYTESIZE(device_spec.format));
+
   return SUCCESS;
 }
 
 void ingest_next_chunk(int16_t *buffer, const int16_t *samples) {
-
-  // for buffer of chunks A B C D -> B C D D
   memmove(
       buffer,
       buffer + chunk_size,
       (buffer_size - chunk_size) * sizeof(buffer[0])
   );
 
-  // B C D D -> B C D E
   memcpy(
       buffer + (buffer_size - chunk_size),
       samples,
       chunk_size * sizeof(buffer[0])
   );
 }
+
 void print_diff(const int t, double difference) {
   const int scale = 10000;
 
   int magnitude = (int)fabs(scale * difference);
-
   int middle = 100;
 
   int pos_diff = (difference > 0) ? magnitude : 0;
@@ -76,6 +76,7 @@ void print_diff(const int t, double difference) {
   for (int i = 0; i < middle - neg_diff; i++) {
     putchar(' ');
   }
+
   for (int i = 0; i < neg_diff; i++) {
     putchar('#');
   }
@@ -87,7 +88,19 @@ void print_diff(const int t, double difference) {
   for (int i = 0; i < pos_diff; i++) {
     putchar('#');
   }
+
   putchar('\n');
+}
+
+double get_rms(const int16_t *buffer) {
+  double total = 0.0;
+
+  for (int i = 0; i < buffer_size; i++) {
+    double sample = buffer[i] / 32768.0;
+    total += sample * sample;
+  }
+
+  return sqrt(total / (float)buffer_size);
 }
 
 double get_error_mean(const int16_t *buffer, const int t) {
@@ -106,7 +119,7 @@ double get_error_mean(const int16_t *buffer, const int t) {
 }
 
 bool is_local_min(const double *lag_err, int i, int scope) {
-  if (i - scope < 0 || i + scope >= buffer_size) {
+  if (i - scope < 0 || i + scope > max_dt) {
     return false;
   }
 
@@ -143,17 +156,17 @@ bool matches_close_enough(const double *lag_err, int i, int scope) {
   double surrounding_mean = surrounding_total / count;
   double check_depth = surrounding_mean - lag_err[i];
 
-  printf("i=%d err=%f depth=%f\n", i, lag_err[i], check_depth);
+  // printf("i=%d err=%f depth=%f\n", i, lag_err[i], check_depth);
+
   return check_depth > MIN_DEPTH_TO_MATCH;
 }
 
-int find_period(double *lag_err) {
+int find_period(const double *lag_err) {
   Err prev_match = {-1, 0.0};
   int dt = 0;
 
-  for (int i = 0; i < buffer_size; i++) {
+  for (int i = 0; i <= max_dt; i++) {
     if (!matches_close_enough(lag_err, i, scope)) {
-
       continue;
     }
 
@@ -165,18 +178,41 @@ int find_period(double *lag_err) {
     prev_match = (Err){i, lag_err[i]};
   }
 
-  if (dt > max_dt) {
+  if (dt <= 0 || dt > max_dt) {
     return 0;
   }
+
   return dt;
 }
 
 int get_freq_hz(const int16_t *buffer) {
-  double lag_err[buffer_size];
+  double rms = get_rms(buffer);
 
-  for (int t = 0; t < buffer_size; t++) {
-    lag_err[t] = get_error_mean(buffer, t);
+  // printf("rms: %f\n", rms);
+
+  if (rms < NOISE_GATE_RMS) {
+    return ERR_BAD_FREQ;
   }
+
+  double lag_err[max_dt + 1];
+
+  uint64_t start = SDL_GetTicksNS();
+
+  // uint64_t end = SDL_GetTicksNS();
+  // printf("get_error_mean runtime: %.3f ms\n", (int)(end - start) / 1e6);
+  for (int t = 0; t <= max_dt; t++) {
+
+    // uint64_t startinside = SDL_GetTicksNS();
+
+    lag_err[t] = get_error_mean(buffer, t);
+    // uint64_t endinside = SDL_GetTicksNS();
+
+    // printf( "g_e_m runtime inside: %.6f ms\n", (int)(endinside - startinside) / 1e6);
+  }
+
+  uint64_t end = SDL_GetTicksNS();
+
+  printf("get_error_mean runtime: %.3f ms\n", (int)(end - start) / 1e6);
 
   int dt = find_period(lag_err);
 
@@ -184,7 +220,7 @@ int get_freq_hz(const int16_t *buffer) {
     return ERR_BAD_FREQ;
   }
 
-  return (int)((float)SAMPLE_FREQUENCY / (float)dt);
+  return (int)((double)SAMPLE_FREQUENCY / dt);
 }
 
 int process(SDL_AudioStream *stream) {
@@ -197,6 +233,11 @@ int process(SDL_AudioStream *stream) {
 
   int16_t samples[chunk_size] = {0};
 
+  int available_chunks = (int)((size_t)available / (size_t)sizeof samples);
+  if (available_chunks > 3) {
+
+    // printf("backlog: %d chunks\n", available_chunks);
+  }
   if (available < (int)sizeof samples) {
     SDL_Delay(1);
     return SAMPLE_WAIT;
@@ -210,16 +251,26 @@ int process(SDL_AudioStream *stream) {
   }
 
   static int16_t buffer[buffer_size] = {0};
+
+
+    uint64_t s = SDL_GetTicksNS();
+
+
+
   ingest_next_chunk(buffer, samples);
+    uint64_t e = SDL_GetTicksNS();
+    printf("ingest chunk runtime %.3f ms\n", (int)(e - s) / 1e6);
   get_freq_hz(buffer);
 
   return SUCCESS;
 }
+
 int main(void) {
   if (!SDL_Init(SDL_INIT_AUDIO)) {
     fprintf(stderr, "SDL_Init: %s\n", SDL_GetError());
     return 1;
   }
+
   SDL_AudioSpec spec = {
       .format = SDL_AUDIO_S16,
       .channels = 1,
@@ -228,14 +279,17 @@ int main(void) {
 
   int c = 0;
   SDL_AudioDeviceID *devices = SDL_GetAudioRecordingDevices(&c);
+
   if (!devices) {
     fprintf(stderr, "%s\n", SDL_GetError());
     return 1;
   }
+
   SDL_AudioDeviceID device = devices[0];
+
   if (get_device_spec(device) != SUCCESS) {
     return 1;
-  };
+  }
 
   SDL_AudioStream *stream =
       SDL_OpenAudioDeviceStream(device, &spec, NULL, NULL);
@@ -253,7 +307,11 @@ int main(void) {
   SDL_Event e;
 
   for (;;) {
+
+    uint64_t start = SDL_GetTicksNS();
+
     int process_status = process(stream);
+
     while (SDL_PollEvent(&e)) {
       if (e.type == SDL_EVENT_QUIT) {
         goto done;
@@ -263,8 +321,12 @@ int main(void) {
     if (process_status == ERR_AUDIO_AVAILABLE ||
         process_status == ERR_AUDIO_READ) {
       break;
-    };
+    }
+
+    uint64_t end = SDL_GetTicksNS();
+    printf("total runtime %.3f ms\n", (int)(end - start) / 1e6);
   }
+
 done:
   SDL_DestroyAudioStream(stream);
   SDL_Quit();
