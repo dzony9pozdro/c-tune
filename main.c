@@ -1,9 +1,10 @@
 #include <SDL3/SDL.h>
 #include <math.h>
+#include <stdbool.h>
 #include <stdio.h>
 
 #define SAMPLE_FREQUENCY 48000
-#define TOLERANCE 1e-3
+#define MIN_DEPTH_TO_MATCH 1e-4
 
 typedef struct {
   int idx;
@@ -16,8 +17,11 @@ enum {
   ERR_AUDIO_AVAILABLE = 2,
   SAMPLE_WAIT = 3,
   ERR_DEVICE_SPEC = 4,
+  ERR_BAD_FREQ = 5,
 };
 enum {
+  max_dt = 2400, // 20hz
+  scope = 5,
   chunk_size = 1024,
   chunks_per_buffer = 8,
   buffer_size = chunk_size * chunks_per_buffer,
@@ -101,35 +105,72 @@ double get_error_mean(const int16_t *buffer, const int t) {
   return error_total / error_count;
 }
 
-int close_enough(const double error, const double prev_err) {
-  double d = error - prev_err;
-
-  if (d < TOLERANCE) {
-    return 1;
+bool is_local_min(const double *lag_err, int i, int scope) {
+  if (i - scope < 0 || i + scope >= buffer_size) {
+    return false;
   }
 
-  return 0;
+  for (int j = i - scope; j <= i + scope; j++) {
+    if (j == i) {
+      continue;
+    }
+
+    if (lag_err[j] < lag_err[i]) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+bool matches_close_enough(const double *lag_err, int i, int scope) {
+  if (!is_local_min(lag_err, i, scope)) {
+    return false;
+  }
+
+  double surrounding_total = 0.0;
+  int count = 0;
+
+  for (int j = i - scope; j <= i + scope; j++) {
+    if (j == i) {
+      continue;
+    }
+
+    surrounding_total += lag_err[j];
+    count++;
+  }
+
+  double surrounding_mean = surrounding_total / count;
+  double check_depth = surrounding_mean - lag_err[i];
+
+  printf("i=%d err=%f depth=%f\n", i, lag_err[i], check_depth);
+  return check_depth > MIN_DEPTH_TO_MATCH;
 }
 
 int find_period(double *lag_err) {
-  Err prev_lowest_err = (Err){-1, INFINITY};
+  Err prev_match = {-1, 0.0};
   int dt = 0;
 
-  for (int i = 0; i < buffer_size; i++){
-    if (lag_err[i] < prev_lowest_err.value){
-      prev_lowest_err = (Err){i, lag_err[i]};
-    }
-  }
-
   for (int i = 0; i < buffer_size; i++) {
-    if (close_enough(lag_err[i], prev_lowest_err.value)) {
-      printf("match\n");
-      dt = i - prev_lowest_err.idx;
+    if (!matches_close_enough(lag_err, i, scope)) {
+
+      continue;
     }
+
+    if (prev_match.idx != -1) {
+      dt = i - prev_match.idx;
+      printf("\n=======================\nMATCH: dt = %d\n", dt);
+    }
+
+    prev_match = (Err){i, lag_err[i]};
   }
 
+  if (dt > max_dt) {
+    return 0;
+  }
   return dt;
 }
+
 int get_freq_hz(const int16_t *buffer) {
   double lag_err[buffer_size];
 
@@ -138,6 +179,10 @@ int get_freq_hz(const int16_t *buffer) {
   }
 
   int dt = find_period(lag_err);
+
+  if (dt == 0) {
+    return ERR_BAD_FREQ;
+  }
 
   return (int)((float)SAMPLE_FREQUENCY / (float)dt);
 }
