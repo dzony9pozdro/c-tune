@@ -2,6 +2,7 @@
 #include <math.h>
 #include <stdbool.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 #define SAMPLE_FREQUENCY 48000
 #define MIN_DEPTH_TO_MATCH 1e-4
@@ -50,7 +51,26 @@ static int get_device_spec(uint32_t device) {
   return SUCCESS;
 }
 
-void ingest_next_chunk(int16_t *buffer, const int16_t *samples) {
+void ingest_next_chunk(
+    int16_t *buffer,
+    const int16_t *samples,
+    double *error_total
+) {
+  const double scale = 1.0 / 32768.0;
+
+  /*
+   * Remove the pair errors belonging to the chunk
+   * which is about to fall off the front.
+   */
+  for (int t = 1; t <= max_dt; t++) {
+    for (int i = 0; i < chunk_size; i++) {
+      int difference =
+          abs(buffer[i + t] - buffer[i]);
+
+      error_total[t] -= difference;
+    }
+  }
+
   memmove(
       buffer,
       buffer + chunk_size,
@@ -62,6 +82,24 @@ void ingest_next_chunk(int16_t *buffer, const int16_t *samples) {
       samples,
       chunk_size * sizeof(buffer[0])
   );
+
+  /*
+   * Add the pair errors introduced by the new chunk.
+   *
+   * For each lag t, these are exactly the pairs whose
+   * second sample lies inside the newly inserted chunk.
+   */
+  for (int t = 1; t <= max_dt; t++) {
+    int start = buffer_size - chunk_size - t;
+    int end = buffer_size - t;
+
+    for (int i = start; i < end; i++) {
+      double difference =
+          fabs((double)buffer[i + t] - (double)buffer[i]) * scale;
+
+      error_total[t] += difference;
+    }
+  }
 }
 
 void print_diff(const int t, double difference) {
@@ -103,21 +141,6 @@ double get_rms(const int16_t *buffer) {
   return sqrt(total / (float)buffer_size);
 }
 
-double get_error_mean(const int16_t *buffer, const int t) {
-  double error_total = 0.0;
-  int error_count = 0;
-
-  for (int i = 0; i + t < buffer_size; i++) {
-    double a = buffer[i] / 32768.0;
-    double b = buffer[i + t] / 32768.0;
-
-    error_total += fabs(b - a);
-    error_count++;
-  }
-
-  return error_total / error_count;
-}
-
 bool is_local_min(const double *lag_err, int i, int scope) {
   if (i - scope < 0 || i + scope > max_dt) {
     return false;
@@ -156,8 +179,6 @@ bool matches_close_enough(const double *lag_err, int i, int scope) {
   double surrounding_mean = surrounding_total / count;
   double check_depth = surrounding_mean - lag_err[i];
 
-  // printf("i=%d err=%f depth=%f\n", i, lag_err[i], check_depth);
-
   return check_depth > MIN_DEPTH_TO_MATCH;
 }
 
@@ -185,10 +206,11 @@ int find_period(const double *lag_err) {
   return dt;
 }
 
-int get_freq_hz(const int16_t *buffer) {
+int get_freq_hz(
+    const int16_t *buffer,
+    const double *error_total
+) {
   double rms = get_rms(buffer);
-
-  // printf("rms: %f\n", rms);
 
   if (rms < NOISE_GATE_RMS) {
     return ERR_BAD_FREQ;
@@ -196,23 +218,11 @@ int get_freq_hz(const int16_t *buffer) {
 
   double lag_err[max_dt + 1];
 
-  uint64_t start = SDL_GetTicksNS();
+  lag_err[0] = 0.0;
 
-  // uint64_t end = SDL_GetTicksNS();
-  // printf("get_error_mean runtime: %.3f ms\n", (int)(end - start) / 1e6);
-  for (int t = 0; t <= max_dt; t++) {
-
-    // uint64_t startinside = SDL_GetTicksNS();
-
-    lag_err[t] = get_error_mean(buffer, t);
-    // uint64_t endinside = SDL_GetTicksNS();
-
-    // printf( "g_e_m runtime inside: %.6f ms\n", (int)(endinside - startinside) / 1e6);
+  for (int t = 1; t <= max_dt; t++) {
+    lag_err[t] = error_total[t] / (buffer_size - t);
   }
-
-  uint64_t end = SDL_GetTicksNS();
-
-  printf("get_error_mean runtime: %.3f ms\n", (int)(end - start) / 1e6);
 
   int dt = find_period(lag_err);
 
@@ -233,17 +243,20 @@ int process(SDL_AudioStream *stream) {
 
   int16_t samples[chunk_size] = {0};
 
-  int available_chunks = (int)((size_t)available / (size_t)sizeof samples);
-  if (available_chunks > 3) {
+  int available_chunks =
+      (int)((size_t)available / sizeof samples);
 
-    // printf("backlog: %d chunks\n", available_chunks);
+  if (available_chunks > 3) {
+    printf("backlog: %d chunks\n", available_chunks);
   }
+
   if (available < (int)sizeof samples) {
     SDL_Delay(1);
     return SAMPLE_WAIT;
   }
 
-  int bytes = SDL_GetAudioStreamData(stream, samples, sizeof samples);
+  int bytes =
+      SDL_GetAudioStreamData(stream, samples, sizeof samples);
 
   if (bytes < 0) {
     fprintf(stderr, "audio read: %s\n", SDL_GetError());
@@ -251,16 +264,20 @@ int process(SDL_AudioStream *stream) {
   }
 
   static int16_t buffer[buffer_size] = {0};
+  static double error_total[max_dt + 1] = {0};
 
+  uint64_t start = SDL_GetTicksNS();
 
-    uint64_t s = SDL_GetTicksNS();
+  ingest_next_chunk(buffer, samples, error_total);
 
+  uint64_t end = SDL_GetTicksNS();
 
+  printf(
+      "ingest + error update runtime: %.3f ms\n",
+      (double)(end - start) / 1e6
+  );
 
-  ingest_next_chunk(buffer, samples);
-    uint64_t e = SDL_GetTicksNS();
-    printf("ingest chunk runtime %.3f ms\n", (int)(e - s) / 1e6);
-  get_freq_hz(buffer);
+  get_freq_hz(buffer, error_total);
 
   return SUCCESS;
 }
@@ -278,7 +295,9 @@ int main(void) {
   };
 
   int c = 0;
-  SDL_AudioDeviceID *devices = SDL_GetAudioRecordingDevices(&c);
+
+  SDL_AudioDeviceID *devices =
+      SDL_GetAudioRecordingDevices(&c);
 
   if (!devices) {
     fprintf(stderr, "%s\n", SDL_GetError());
@@ -307,7 +326,6 @@ int main(void) {
   SDL_Event e;
 
   for (;;) {
-
     uint64_t start = SDL_GetTicksNS();
 
     int process_status = process(stream);
@@ -324,7 +342,11 @@ int main(void) {
     }
 
     uint64_t end = SDL_GetTicksNS();
-    printf("total runtime %.3f ms\n", (int)(end - start) / 1e6);
+
+    printf(
+        "total runtime %.3f ms\n",
+        (double)(end - start) / 1e6
+    );
   }
 
 done:
